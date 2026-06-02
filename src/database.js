@@ -1,9 +1,9 @@
 /**
- * FOOTBALL DATA HUB PRO - v5.21.0 "THE SENTINEL - IRON MEMORY"
+ * FOOTBALL DATA HUB PRO - v5.22.0 "THE MASTER ARCHITECT - FINAL EDITION"
  * 4 Moduli: ADMIN, NOMI, MATCH, CAMPIONATI.
  * Style: GOLDBET DATABASE (OLED Black + Cyan Neon).
- * Feature: Auto-Retry Sync (3x), Cool-down Anti-Ban, Signal Table for Guardian.
- * Fix: Selective Reset (Iron Memory), Full Name Abbr, 10.5px Font, ✖️ Buttons.
+ * Feature: Smart Sync Resume, Signal Display, Soft Delete Archive, Visual Cards.
+ * Fix: Mobile JSON Headers, No-Backtick UI, 10.5px Font, ✖️ Close Buttons.
  */
 
 const FALLBACK_CONFIG = {
@@ -67,9 +67,11 @@ function getCurrentSeason() {
   return now.getMonth() >= 6 ? String(year).slice(-2) + String(year + 1).slice(-2) : String(year - 1).slice(-2) + String(year).slice(-2);
 }
 
-async function updateSignal(env) {
-  const ts = new Date().toISOString();
-  await env.DB.prepare("INSERT OR REPLACE INTO system_status (key, value) VALUES ('LAST_UPDATE', ?)").bind(ts).run();
+async function updateSignal(env, changes) {
+  if (changes > 0) {
+    const ts = new Date().toLocaleString('it-IT');
+    await env.DB.prepare("INSERT OR REPLACE INTO system_status (key, value) VALUES ('LAST_UPDATE', ?)").bind(ts).run();
+  }
 }
 
 // --- GESTIONE LEAGUES ---
@@ -149,32 +151,40 @@ async function handleAdminStatus(env, h) {
   const unknown = await env.DB.prepare("SELECT DISTINCT s.name, l.country FROM (SELECT hometeam as name, div FROM staged_matches UNION SELECT awayteam as name, div FROM staged_matches) s JOIN leagues l ON s.div = l.id WHERE s.name NOT IN (SELECT alias FROM team_aliases)").all();
   const teams = await env.DB.prepare("SELECT t.id, t.name, t.country, GROUP_CONCAT(a.alias, ' | ') as aliases FROM teams t LEFT JOIN team_aliases a ON t.id = a.team_id GROUP BY t.id ORDER BY t.country, t.name").all();
   const ignored = await env.DB.prepare("SELECT id FROM ignored_duplicates").all();
-  return new Response(JSON.stringify({ total: total.c, staged: staged.c, unknown: unknown.results, teams: teams.results, ignored: ignored.results.map(i => i.id) }), { headers: h });
+  const signal = await env.DB.prepare("SELECT value FROM system_status WHERE key = 'LAST_UPDATE'").first();
+  return new Response(JSON.stringify({ total: total.c, staged: staged.c, unknown: unknown.results, teams: teams.results, ignored: ignored.results.map(i => i.id), lastUpdate: signal ? signal.value : 'MAI' }), { headers: h });
 }
 
-// --- ENGINE DOWNLOAD ---
+// --- ENGINE DOWNLOAD (SMART RESUME) ---
 
 async function fetchAndProcess(url, league, env, fullFile = false, seasonParam = null) {
   try {
     const curS = seasonParam || getCurrentSeason();
-    if (!fullFile && curS !== getCurrentSeason()) {
+    
+    // SMART RESUME: Salta stagioni passate già presenti
+    if (curS !== getCurrentSeason()) {
       const check = await env.DB.prepare("SELECT COUNT(*) as c FROM matches WHERE div = ? AND season = ?").bind(league.id, curS).first();
       if (check.c > 0) return { success: true, status: 200, rows: 0, skipped: true };
     }
+
     const headers = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Referer": "https://www.football-data.co.uk/" };
     const resp = await fetch(url, { headers: headers });
     if (!resp.ok) return { success: false, status: resp.status, rows: 0 };
     const text = await resp.text();
     let rows = text.split("\n").map(r => r.trim()).filter(r => r);
+    
     if (!fullFile && league.type === "extra" && rows.length > 300) { rows = [rows[0]].concat(rows.slice(-300)); }
+    
     const headersCsv = rows[0].split(",").map(h => h.trim().toLowerCase());
     const colMap = {};
     const targets = { h: ["hometeam", "home", "ht"], a: ["awayteam", "away", "at"], s: ["season"], d: ["date"], fthg: ["fthg", "hg"], ftag: ["ftag", "ag"], ftr: ["ftr", "res"], hthg: ["hthg"], htag: ["htag"], htr: ["htr"], hs: ["hs"], as: ["as"], hst: ["hst"], ast: ["ast"], hf: ["hf"], af: ["af"], hc: ["hc"], ac: ["ac"], hy: ["hy"], ay: ["ay"], hr: ["hr"], ar: ["ar"] };
     for (const [key, aliases] of Object.entries(targets)) colMap[key] = headersCsv.findIndex(h => aliases.includes(h));
+
     const aliasData = await env.DB.prepare("SELECT alias, team_id FROM team_aliases").all();
     const aliasMap = new Map(aliasData.results.map(i => [i.alias, i.team_id]));
     const teamsData = await env.DB.prepare("SELECT id, name FROM teams").all();
     const allTeams = teamsData.results;
+
     const uniqueNamesInFile = new Set();
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i].split(",");
@@ -182,6 +192,7 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
       const a = r[colMap.a] ? r[colMap.a].trim().toUpperCase() : null;
       if (h) uniqueNamesInFile.add(h); if (a) uniqueNamesInFile.add(a);
     }
+
     let hasUnknown = false;
     for (const name of uniqueNamesInFile) {
       if (!aliasMap.has(name)) {
@@ -195,6 +206,8 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
         } else { hasUnknown = true; }
       }
     }
+
+    let totalChanges = 0;
     const batch = [];
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i].split(","); if (r.length < 5) continue;
@@ -207,16 +220,25 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
       const commonValues = [ league.id, s, dateIso, h, a, parseInt(getVal("fthg")), parseInt(getVal("ftag")), getVal("ftr"), parseInt(getVal("hthg")), parseInt(getVal("htag")), getVal("htr"), parseInt(getVal("hs")), parseInt(getVal("as")), parseInt(getVal("hst")), parseInt(getVal("ast")), parseInt(getVal("hf")), parseInt(getVal("af")), parseInt(getVal("hc")), parseInt(getVal("ac")), parseInt(getVal("hy")), parseInt(getVal("ay")), parseInt(getVal("hr")), parseInt(getVal("ar")) ];
       if (!hasUnknown) {
         const hId = aliasMap.get(h), aId = aliasMap.get(a);
-        batch.push(env.DB.prepare("INSERT OR REPLACE INTO matches " + sqlFields + ", home_team_id, away_team_id) " + sqlPlaceholders + ", ?, ?)").bind(s + "_" + league.id + "_" + hId + "_" + aId, ...commonValues, hId, aId));
+        const prodId = s + "_" + league.id + "_" + hId + "_" + aId;
+        batch.push(env.DB.prepare("INSERT INTO matches " + sqlFields + ", home_team_id, away_team_id) " + sqlPlaceholders + ", ?, ?) ON CONFLICT(id) DO UPDATE SET fthg=excluded.fthg, ftag=excluded.ftag, ftr=excluded.ftr, hthg=excluded.hthg, htag=excluded.htag, htr=excluded.htr, hs=excluded.hs, as_stats=excluded.as_stats, hst=excluded.hst, ast=excluded.ast, hf=excluded.hf, af=excluded.af, hc=excluded.hc, ac=excluded.ac, hy=excluded.hy, ay=excluded.ay, hr=excluded.hr, ar=excluded.ar WHERE matches.fthg != excluded.fthg OR matches.ftag != excluded.ftag OR matches.hthg != excluded.hthg OR matches.htag != excluded.htag OR matches.ftr != excluded.ftr").bind(prodId, ...commonValues, hId, aId));
       } else {
-        batch.push(env.DB.prepare("INSERT OR REPLACE INTO staged_matches " + sqlFields + ") " + sqlPlaceholders + ")").bind((s + "_" + league.id + "_" + h + "_" + a).replace(/\s+/g, ""), ...commonValues));
+        const rowId = (s + "_" + league.id + "_" + h + "_" + a).replace(/\s+/g, "");
+        batch.push(env.DB.prepare("INSERT OR REPLACE INTO staged_matches " + sqlFields + ") " + sqlPlaceholders + ")").bind(rowId, ...commonValues));
       }
-      if (batch.length >= 50) { await env.DB.batch(batch); batch.length = 0; }
+      if (batch.length >= 50) { 
+        const resBatch = await env.DB.batch(batch); 
+        resBatch.forEach(r => totalChanges += r.meta.changes);
+        batch.length = 0; 
+      }
     }
-    if (batch.length > 0) await env.DB.batch(batch);
+    if (batch.length > 0) { 
+      const resBatch = await env.DB.batch(batch); 
+      resBatch.forEach(r => totalChanges += r.meta.changes);
+    }
     await env.DB.prepare("UPDATE matches SET id = season || '_' || div || '_' || home_team_id || '_' || away_team_id WHERE home_team_id IS NOT NULL AND away_team_id IS NOT NULL").run();
-    await updateSignal(env);
-    return { success: true, status: resp.status, rows: rows.length - 1, staged: hasUnknown };
+    await updateSignal(env, totalChanges);
+    return { success: true, status: resp.status, rows: rows.length - 1, staged: hasUnknown, changes: totalChanges };
   } catch (e) { return { success: false, status: 500, error: e.message }; }
 }
 
@@ -242,9 +264,10 @@ async function handleAutomatedUpdate(env) {
 async function handleTransferInternal(env) {
   const qInsert = env.DB.prepare("INSERT OR REPLACE INTO matches (id, div, season, date, hometeam, awayteam, fthg, ftag, ftr, hthg, htag, htr, hs, as_stats, hst, ast, hf, af, hc, ac, hy, ay, hr, ar, home_team_id, away_team_id) SELECT s.season || '_' || s.div || '_' || a1.team_id || '_' || a2.team_id, s.div, s.season, s.date, s.hometeam, s.awayteam, s.fthg, s.ftag, s.ftr, s.hthg, s.htag, s.htr, s.hs, s.as_stats, s.hst, s.ast, s.hf, s.af, s.hc, s.ac, s.hy, s.ay, s.hr, s.ar, a1.team_id, a2.team_id FROM staged_matches s JOIN team_aliases a1 ON s.hometeam = a1.alias JOIN team_aliases a2 ON s.awayteam = a2.alias WHERE s.hometeam IN (SELECT alias FROM team_aliases) AND s.awayteam IN (SELECT alias FROM team_aliases)");
   const qDelete = env.DB.prepare("DELETE FROM staged_matches WHERE hometeam IN (SELECT alias FROM team_aliases) AND awayteam IN (SELECT alias FROM team_aliases)");
-  await env.DB.batch([qInsert, qDelete]);
+  const res = await env.DB.batch([qInsert, qDelete]);
+  const changes = res[0].meta.changes;
   await env.DB.prepare("UPDATE matches SET id = season || '_' || div || '_' || home_team_id || '_' || away_team_id WHERE home_team_id IS NOT NULL AND away_team_id IS NOT NULL").run();
-  await updateSignal(env);
+  await updateSignal(env, changes);
 }
 
 async function handleTransfer(env, h) { await handleTransferInternal(env); return new Response(JSON.stringify({ success: true }), { headers: h }); }
@@ -263,7 +286,7 @@ function generateHTML() {
 "<head>",
 "    <meta charset='UTF-8'>",
 "    <meta name='viewport' content='width=device-width, initial-scale=1.0'>",
-"    <title>GOLDBET DATABASE v5.21.0</title>",
+"    <title>GOLDBET DATABASE v5.22.0</title>",
 "    <script src='https://cdn.tailwindcss.com'></script>",
 "    <style>",
 "        body { font-family: sans-serif; margin: 0; background: #000; font-size: 12px; color: #d4d4d8; }",
@@ -470,7 +493,7 @@ function generateHTML() {
 "            }",
 "            logConsole(\"🏁 OPERAZIONE COMPLETATA.\", \"success\"); loadMatches();",
 "        }",
-"        async function openNames() { if (document.getElementById('namesModal').style.display !== 'block') toggleModal('namesModal'); var res = await fetch('/api/admin/status'); var data = await res.json(); teamData = data.teams; ignoredList = data.ignored; unknownData = data.unknown; var unkHtml = \"\"; if(unknownData.length > 0) { for(var i=0; i<unknownData.length; i++) { var u = unknownData[i]; var best = {name:'Nuova', score:0, id:null}; for(var j=0; j<teamData.length; j++) { var s = lev(u.name.toLowerCase(), teamData[j].name.toLowerCase()); if(s>best.score) { best.score = s; best.name = teamData[j].name; best.id = teamData[j].id; } } unkHtml += \"<div class='val-box'><b>\" + u.name + \"</b> <small>[\" + u.country + \"]</small><br><button class='btn btn-success' onclick=\\\"validate('\" + u.name.replace(/'/g, \"\\\\'\") + \"', null, true, '\" + u.country + \"')\\\">NUOVA</button>\" + (best.score > 0.6 ? \" <button class='btn btn-primary' onclick=\\\"validate('\" + u.name.replace(/'/g, \"\\\\'\") + \"', \" + best.id + \", false)\\\">USA \" + best.name + \"</button>\" : \"\") + \"</div>\"; } } else { unkHtml = \"<span style='color:#22c55e; font-weight:bold'>✅ Tutto mappato correttamente!</span>\"; } document.getElementById('valList').innerHTML = unkHtml; var grouped = {}; for(var i=0; i<teamData.length; i++) { var t = teamData[i]; if(!grouped[t.country]) grouped[t.country]=[]; grouped[t.country].push(t); } var regHtml = \"\"; var keys = Object.keys(grouped).sort(); for(var i=0; i<keys.length; i++) { var c = keys[i]; var arr = grouped[c]; regHtml += \"<details class='border border-zinc-800 mb-2 rounded-lg'><summary class='p-3 cursor-pointer bg-zinc-900 font-bold'>\" + c + \" (\" + arr.length + \")</summary>\"; for(var j=0; j<arr.length; j++) { var t=arr[j]; regHtml += \"<div class='team-row'><span>[\" + t.id + \"] <b>\" + t.name + \"</b> <span class='action-icon' onclick=\\\"promptCountry('edit', {teamId:\"+t.id+\"})\\\">✏️</span> <span class='action-icon' onclick=\\\"openSplit(\"+t.id+\", '\"+(t.aliases||'').replace(/'/g,\"\\\\'\")+\"')\\\">➗</span></span><small class='text-zinc-500'>\"+(t.aliases||'')+\"</small></div>\"; } regHtml += \"</details>\"; } document.getElementById('teamRegistry').innerHTML = regHtml; loadAbbr(); }",
+"        async function openNames() { if (document.getElementById('namesModal').style.display !== 'block') toggleModal('namesModal'); var res = await fetch('/api/admin/status'); var data = await res.json(); teamData = data.teams; ignoredList = data.ignored; unknownData = data.unknown; var unkHtml = \"\"; if(unknownData.length > 0) { for(var i=0; i<unknownData.length; i++) { var u = unknownData[i]; var best = {name:'Nuova', score:0, id:null}; for(var j=0; j<teamData.length; j++) { var s = lev(u.name.toLowerCase(), teamData[j].name.toLowerCase()); if(s>best.score) { best.score = s; best.name = teamData[j].name; best.id = teamData[j].id; } } unkHtml += \"<div class='val-box bg-zinc-900 border-zinc-700 text-white'><b>\" + u.name + \"</b> <small class='text-cyan-400'>[\" + u.country + \"]</small><br><button class='btn btn-success mt-2' onclick=\\\"validate('\" + u.name.replace(/'/g, \"\\\\'\") + \"', null, true, '\" + u.country + \"')\\\">NUOVA</button>\" + (best.score > 0.6 ? \" <button class='btn btn-primary mt-2 ml-2' onclick=\\\"validate('\" + u.name.replace(/'/g, \"\\\\'\") + \"', \" + best.id + \", false)\\\">USA \" + best.name + \"</button>\" : \"\") + \"</div>\"; } } else { unkHtml = \"<span style='color:#22c55e; font-weight:bold'>✅ Tutto mappato correttamente!</span>\"; } document.getElementById('valList').innerHTML = unkHtml; var grouped = {}; for(var i=0; i<teamData.length; i++) { var t = teamData[i]; if(!grouped[t.country]) grouped[t.country]=[]; grouped[t.country].push(t); } var regHtml = \"\"; var keys = Object.keys(grouped).sort(); for(var i=0; i<keys.length; i++) { var c = keys[i]; var arr = grouped[c]; regHtml += \"<details class='border border-zinc-800 mb-2 rounded-lg'><summary class='p-3 cursor-pointer bg-zinc-900 font-bold'>\" + c + \" (\" + arr.length + \")</summary>\"; for(var j=0; j<arr.length; j++) { var t=arr[j]; regHtml += \"<div class='team-row'><span>[\" + t.id + \"] <b>\" + t.name + \"</b> <span class='action-icon' onclick=\\\"promptCountry('edit', {teamId:\"+t.id+\"})\\\">✏️</span> <span class='action-icon' onclick=\\\"openSplit(\"+t.id+\", '\"+(t.aliases||'').replace(/'/g,\"\\\\'\")+\"')\\\">➗</span></span><small class='text-zinc-500'>\"+(t.aliases||'')+\"</small></div>\"; } regHtml += \"</details>\"; } document.getElementById('teamRegistry').innerHTML = regHtml; loadAbbr(); }",
 "        async function loadAbbr() { var res = await fetch('/api/admin/abbr'); var data = await res.json(); var html = \"<table width='100%'>\"; for(var i=0; i<data.length; i++) { html += \"<tr class='border-b border-zinc-800'><td>\"+data[i].original+\"</td><td>➔</td><td>\"+data[i].short+\"</td><td align='right'><button class='text-red-500' onclick=\\\"delAbbr('\"+data[i].original+\"')\\\">🗑️</button></td></tr>\"; } document.getElementById('abbrList').innerHTML = html + \"</table>\"; }",
 "        async function addAbbr() { var o = document.getElementById('abbrOrig').value; var s = document.getElementById('abbrShort').value; if(!o || !s) return; await fetch('/api/admin/abbr-add', { method:'POST', body: JSON.stringify({original:o, short:s}) }); document.getElementById('abbrOrig').value=''; document.getElementById('abbrShort').value=''; loadAbbr(); loadMatches(); }",
 "        async function delAbbr(o) { await fetch('/api/admin/abbr-del', { method:'POST', body: JSON.stringify({original:o}) }); loadAbbr(); loadMatches(); }",
@@ -484,7 +507,7 @@ function generateHTML() {
 "        async function mergeManual(s, t) { var src = s || document.getElementById('mSrc').value; var trg = t || document.getElementById('mTrg').value; if(!src || !trg || !confirm(\"Confermi fusione?\")) return; await fetch('/api/admin/merge', { method:'POST', body: JSON.stringify({sourceId: src, targetId: trg}) }); openNames(); }",
 "        async function transfer() { toggleModal('adminModal'); logConsole(\"Promozione Diga...\", \"\"); toggleModal('consoleModal'); await fetch('/api/admin/transfer'); logConsole(\"✅ Diga Svuotata.\", \"success\"); loadMatches(); }",
 "        async function resetDB() { if(prompt(\"Password RESET:\")===\"RESET\") { await fetch('/api/admin/reset', {method:'POST', body:JSON.stringify({password:\"RESET\"})}); location.reload(); } }",
-"        async function openAdmin() { if(document.getElementById('adminModal').style.display !== 'block') toggleModal('adminModal'); var res = await fetch('/api/admin/status'); var data = await res.json(); document.getElementById('admStats').innerHTML = \"<b>PROD:</b> \" + data.total + \" | <b>DIGA:</b> \" + data.staged; document.getElementById('promoBtn').style.display = (data.staged > 0 && data.unknown.length === 0) ? 'block' : 'none'; }",
+"        async function openAdmin() { if(document.getElementById('adminModal').style.display !== 'block') toggleModal('adminModal'); var res = await fetch('/api/admin/status'); var data = await res.json(); document.getElementById('admStats').innerHTML = \"<div class='text-cyan-400 font-black mb-2'>ULTIMO AGGIORNAMENTO: \" + data.lastUpdate + \"</div><b>PROD:</b> \" + data.total + \" | <b>DIGA:</b> \" + data.staged; document.getElementById('promoBtn').style.display = (data.staged > 0 && data.unknown.length === 0) ? 'block' : 'none'; }",
 "        async function openMatches() { toggleModal('matchModal'); var res = await fetch('/api/admin/league-status'); var data = await res.json(); var html = \"\"; for(var i=0; i<LEAGUES.length; i++){ var l=LEAGUES[i]; if(!l.is_active) continue; var pObj=data.prod.find(function(x){return x.div===l.id;}); var p=pObj?pObj.c:0; var sObj=data.staged.find(function(x){return x.div===l.id;}); var s=sObj?sObj.c:0; var scObj=data.seasons.find(function(x){return x.div===l.id;}); var sc=scObj?scObj.c:0; html += \"<tr class='border-b border-zinc-800'><td>\"+l.name+\"</td><td align='center'>\"+sc+\"</td><td align='center'>\"+p+\"</td><td align='center' class='\"+(s>0?\"text-red-500 font-black\":\"\")+\"'>\"+s+\"</td></tr>\"; } document.getElementById('statusTableBody').innerHTML = html; }",
 "        async function openLeagues() {",
 "            var res = await fetch('/api/leagues'); var data = await res.json();",
