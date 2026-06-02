@@ -1,1 +1,22 @@
+name = "goldbet-database"
+main = "index.js"
+compatibility_date = "2024-05-02"
 
+# Configurazione del Database D1
+[[d1_databases]]
+binding = "DB" # Deve corrispondere a env.DB nel codice
+database_name = "goldbet_db" # Il nome che hai dato al database su Cloudflare
+database_id = "INSERISCI-QUI-IL-TUO-ID-DATABASE" # Recuperalo dalla dashboard Cloudflare (D1 -> Nome DB)
+
+# Configurazione del Cron Trigger (Ogni Minuto)
+# Necessario per la rotazione automatica dei campionati senza crash CPU
+[triggers]
+crons = ["* * * * *"]
+
+# Variabili d'ambiente
+[vars]
+ADMIN_PASSWORD = "RESET"
+
+# Limiti di utilizzo (Ottimizzazione per piano Free)
+[observability]
+enabled = true
