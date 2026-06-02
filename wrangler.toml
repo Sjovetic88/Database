@@ -1,5 +1,5 @@
-name = "goldbet-database"
-main = "index.js"
+name = "dataset"
+main = "src/database.js"
 compatibility_date = "2024-05-02"
 
 # Configurazione del Database D1
