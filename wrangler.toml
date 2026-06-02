@@ -6,7 +6,7 @@ compatibility_date = "2024-05-02"
 [[d1_databases]]
 binding = "DB" # Deve corrispondere a env.DB nel codice
 database_name = "goldbet_db" # Il nome che hai dato al database su Cloudflare
-database_id = "INSERISCI-QUI-IL-TUO-ID-DATABASE" # Recuperalo dalla dashboard Cloudflare (D1 -> Nome DB)
+database_id = "dd9a583d-ee1c-4114-891a-bd44b17ec1e7" # Recuperalo dalla dashboard Cloudflare (D1 -> Nome DB)
 
 # Configurazione del Cron Trigger (Ogni Minuto)
 # Necessario per la rotazione automatica dei campionati senza crash CPU
