@@ -1,9 +1,9 @@
 /**
- * FOOTBALL DATA HUB PRO - v5.22.0 "THE MASTER ARCHITECT - FINAL EDITION"
+ * FOOTBALL DATA HUB PRO - v5.23.0 "THE SENTINEL - ENGINE SHIELD"
  * 4 Moduli: ADMIN, NOMI, MATCH, CAMPIONATI.
  * Style: GOLDBET DATABASE (OLED Black + Cyan Neon).
- * Feature: Smart Sync Resume, Signal Display, Soft Delete Archive, Visual Cards.
- * Fix: Mobile JSON Headers, No-Backtick UI, 10.5px Font, ✖️ Close Buttons.
+ * Feature: Engine Auto-Reset, Rome Timezone, Smart Sync Resume, Visual Cards.
+ * Fix: Pre-Scan CPU Fix, No-Backtick UI, 10.5px Font, ✖️ Close Buttons.
  */
 
 const FALLBACK_CONFIG = {
@@ -69,7 +69,7 @@ function getCurrentSeason() {
 
 async function updateSignal(env, changes) {
   if (changes > 0) {
-    const ts = new Date().toLocaleString('it-IT');
+    const ts = new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" });
     await env.DB.prepare("INSERT OR REPLACE INTO system_status (key, value) VALUES ('LAST_UPDATE', ?)").bind(ts).run();
   }
 }
@@ -152,16 +152,14 @@ async function handleAdminStatus(env, h) {
   const teams = await env.DB.prepare("SELECT t.id, t.name, t.country, GROUP_CONCAT(a.alias, ' | ') as aliases FROM teams t LEFT JOIN team_aliases a ON t.id = a.team_id GROUP BY t.id ORDER BY t.country, t.name").all();
   const ignored = await env.DB.prepare("SELECT id FROM ignored_duplicates").all();
   const signal = await env.DB.prepare("SELECT value FROM system_status WHERE key = 'LAST_UPDATE'").first();
-  return new Response(JSON.stringify({ total: total.c, staged: staged.c, unknown: unknown.results, teams: teams.results, ignored: ignored.results.map(i => i.id), lastUpdate: signal ? signal.value : 'MAI' }), { headers: h });
+  return new Response(JSON.stringify({ total: total.c, staged: staged.c, unknown: unknown.results, teams: teams.results, ignored: ignored.results.map(i => i.id), lastUpdate: signal ? signal.value : "MAI" }), { headers: h });
 }
 
-// --- ENGINE DOWNLOAD (SMART RESUME) ---
+// --- ENGINE DOWNLOAD (ENGINE SHIELD) ---
 
 async function fetchAndProcess(url, league, env, fullFile = false, seasonParam = null) {
   try {
     const curS = seasonParam || getCurrentSeason();
-    
-    // SMART RESUME: Salta stagioni passate già presenti
     if (curS !== getCurrentSeason()) {
       const check = await env.DB.prepare("SELECT COUNT(*) as c FROM matches WHERE div = ? AND season = ?").bind(league.id, curS).first();
       if (check.c > 0) return { success: true, status: 200, rows: 0, skipped: true };
@@ -172,7 +170,6 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
     if (!resp.ok) return { success: false, status: resp.status, rows: 0 };
     const text = await resp.text();
     let rows = text.split("\n").map(r => r.trim()).filter(r => r);
-    
     if (!fullFile && league.type === "extra" && rows.length > 300) { rows = [rows[0]].concat(rows.slice(-300)); }
     
     const headersCsv = rows[0].split(",").map(h => h.trim().toLowerCase());
@@ -186,14 +183,25 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
     const allTeams = teamsData.results;
 
     const uniqueNamesInFile = new Set();
+    const matchIdsInFile = [];
     for (let i = 1; i < rows.length; i++) {
-      const r = rows[i].split(",");
+      const r = rows[i].split(","); if (r.length < 5) continue;
       const h = r[colMap.h] ? r[colMap.h].trim().toUpperCase() : null;
       const a = r[colMap.a] ? r[colMap.a].trim().toUpperCase() : null;
       if (h) uniqueNamesInFile.add(h); if (a) uniqueNamesInFile.add(a);
+      
+      const hId = aliasMap.get(h), aId = aliasMap.get(a);
+      if (hId && aId) matchIdsInFile.push(curS + "_" + league.id + "_" + hId + "_" + aId);
     }
 
-    let hasUnknown = false;
+    // ENGINE SHIELD: Controlla se stiamo modificando il passato elaborato
+    let needsEngineReset = false;
+    if (matchIdsInFile.length > 0) {
+      const placeholders = matchIdsInFile.map(() => "?").join(",");
+      const checkArchivio = await env.DB.prepare("SELECT COUNT(*) as c FROM archivio_elaborato WHERE id IN (" + placeholders + ")").bind(...matchIdsInFile).first();
+      if (checkArchivio.c > 0) needsEngineReset = true;
+    }
+
     for (const name of uniqueNamesInFile) {
       if (!aliasMap.has(name)) {
         let bestScore = 0;
@@ -203,42 +211,53 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
           const newId = res.meta.last_row_id;
           await env.DB.prepare("INSERT INTO team_aliases (alias, team_id) VALUES (?, ?)").bind(name, newId).run();
           aliasMap.set(name, newId);
-        } else { hasUnknown = true; }
+        }
       }
     }
 
     let totalChanges = 0;
     const batch = [];
+    
+    // Se serve reset, aggiungi le query di pulizia nazione al batch
+    if (needsEngineReset) {
+      batch.push(env.DB.prepare("DELETE FROM archivio_elaborato WHERE nazione = ?").bind(league.country));
+      batch.push(env.DB.prepare("UPDATE classifica_elite SET elo = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0 WHERE nazione = ?").bind(league.country));
+      batch.push(env.DB.prepare("UPDATE stato_nazioni SET completato = 1 WHERE nazione = ?").bind(league.country));
+    }
+
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i].split(","); if (r.length < 5) continue;
       const getVal = (key) => (colMap[key] !== -1 && r[colMap[key]]) ? r[colMap[key]].trim().toUpperCase() : null;
       const h = getVal("h"), a = getVal("a"); if (!h || !a) continue;
       const s = getVal("s") || curS;
       const dr = getVal("d"); let dateIso = ""; if (dr) { const p = dr.split("/"); if (p.length === 3) { const y = p[2].length === 2 ? (parseInt(p[2]) > 50 ? "19"+p[2] : "20"+p[2]) : p[2]; dateIso = y + "-" + p[1].padStart(2,"0") + "-" + p[0].padStart(2,"0"); } }
+      
+      const hId = aliasMap.get(h), aId = aliasMap.get(a);
       const sqlFields = "(id, div, season, date, hometeam, awayteam, fthg, ftag, ftr, hthg, htag, htr, hs, as_stats, hst, ast, hf, af, hc, ac, hy, ay, hr, ar";
       const sqlPlaceholders = "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?";
       const commonValues = [ league.id, s, dateIso, h, a, parseInt(getVal("fthg")), parseInt(getVal("ftag")), getVal("ftr"), parseInt(getVal("hthg")), parseInt(getVal("htag")), getVal("htr"), parseInt(getVal("hs")), parseInt(getVal("as")), parseInt(getVal("hst")), parseInt(getVal("ast")), parseInt(getVal("hf")), parseInt(getVal("af")), parseInt(getVal("hc")), parseInt(getVal("ac")), parseInt(getVal("hy")), parseInt(getVal("ay")), parseInt(getVal("hr")), parseInt(getVal("ar")) ];
-      if (!hasUnknown) {
-        const hId = aliasMap.get(h), aId = aliasMap.get(a);
+
+      if (hId && aId) {
         const prodId = s + "_" + league.id + "_" + hId + "_" + aId;
         batch.push(env.DB.prepare("INSERT INTO matches " + sqlFields + ", home_team_id, away_team_id) " + sqlPlaceholders + ", ?, ?) ON CONFLICT(id) DO UPDATE SET fthg=excluded.fthg, ftag=excluded.ftag, ftr=excluded.ftr, hthg=excluded.hthg, htag=excluded.htag, htr=excluded.htr, hs=excluded.hs, as_stats=excluded.as_stats, hst=excluded.hst, ast=excluded.ast, hf=excluded.hf, af=excluded.af, hc=excluded.hc, ac=excluded.ac, hy=excluded.hy, ay=excluded.ay, hr=excluded.hr, ar=excluded.ar WHERE matches.fthg != excluded.fthg OR matches.ftag != excluded.ftag OR matches.hthg != excluded.hthg OR matches.htag != excluded.htag OR matches.ftr != excluded.ftr").bind(prodId, ...commonValues, hId, aId));
       } else {
         const rowId = (s + "_" + league.id + "_" + h + "_" + a).replace(/\s+/g, "");
         batch.push(env.DB.prepare("INSERT OR REPLACE INTO staged_matches " + sqlFields + ") " + sqlPlaceholders + ")").bind(rowId, ...commonValues));
       }
+      
       if (batch.length >= 50) { 
         const resBatch = await env.DB.batch(batch); 
-        resBatch.forEach(r => totalChanges += r.meta.changes);
+        resBatch.forEach(r => { if(r.meta.changes) totalChanges += r.meta.changes; });
         batch.length = 0; 
       }
     }
     if (batch.length > 0) { 
       const resBatch = await env.DB.batch(batch); 
-      resBatch.forEach(r => totalChanges += r.meta.changes);
+      resBatch.forEach(r => { if(r.meta.changes) totalChanges += r.meta.changes; });
     }
     await env.DB.prepare("UPDATE matches SET id = season || '_' || div || '_' || home_team_id || '_' || away_team_id WHERE home_team_id IS NOT NULL AND away_team_id IS NOT NULL").run();
     await updateSignal(env, totalChanges);
-    return { success: true, status: resp.status, rows: rows.length - 1, staged: hasUnknown, changes: totalChanges };
+    return { success: true, status: resp.status, rows: rows.length - 1, staged: (uniqueNamesInFile.size > aliasMap.size), changes: totalChanges };
   } catch (e) { return { success: false, status: 500, error: e.message }; }
 }
 
@@ -286,7 +305,7 @@ function generateHTML() {
 "<head>",
 "    <meta charset='UTF-8'>",
 "    <meta name='viewport' content='width=device-width, initial-scale=1.0'>",
-"    <title>GOLDBET DATABASE v5.22.0</title>",
+"    <title>GOLDBET DATABASE v5.23.0</title>",
 "    <script src='https://cdn.tailwindcss.com'></script>",
 "    <style>",
 "        body { font-family: sans-serif; margin: 0; background: #000; font-size: 12px; color: #d4d4d8; }",
@@ -445,7 +464,7 @@ function generateHTML() {
 "        <div class='modal-content'>",
 "            <span class='close-x' onclick=\"toggleModal('adminModal')\">✖️</span>",
 "            <h2 class='font-black mb-4 text-cyan-400'>⚙️ AMMINISTRAZIONE</h2>",
-"            <div id='admStats' class='p-4 bg-zinc-900 rounded-lg border border-zinc-800 mb-6'></div>",
+"            <div id='admStats' class='p-4 bg-zinc-900 rounded-lg border border-zinc-800 mb-6 text-center'></div>",
 "            <button class='btn btn-warning w-full mb-4 text-lg h-14' onclick=\"startSync('full')\">🚀 SYNC COMPLETO</button>",
 "            <button id='promoBtn' class='btn btn-success w-full mb-4' style='display:none' onclick='transfer()'>PROMUOVI TUTTA LA DIGA</button>",
 "            <hr class='my-4 border-zinc-800'><button class='btn btn-danger w-full' onclick='resetDB()'>RESET TOTALE RISULTATI</button>",
@@ -483,7 +502,7 @@ function generateHTML() {
 "                            try {",
 "                                var res = await fetch('/api/admin/sync-single', { method:'POST', body: JSON.stringify({leagueId: l.id, season: s, fullFile: true}) });",
 "                                var data = await res.json();",
-"                                if(data.success) { logConsole(\"✅ OK\", \"success\"); success = true; }",
+"                                if(data.success) { if(data.skipped) logConsole(\"⏭️ Già presente.\", \"\"); else logConsole(\"✅ OK\", \"success\"); success = true; }",
 "                                else { retry++; if(retry<3) logConsole(\"⚠️ Riprovo...\", \"\"); }",
 "                            } catch(e) { retry++; }",
 "                            await new Promise(r => setTimeout(r, 300));",
