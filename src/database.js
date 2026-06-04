@@ -1,9 +1,9 @@
 /**
- * FOOTBALL DATA HUB PRO - v5.24.0 "THE MASTER ARCHITECT - TOTAL CONTROL"
+ * FOOTBALL DATA HUB PRO - v5.25.0 "THE MASTER ARCHITECT - FINAL FIX"
  * 4 Moduli: ADMIN, NOMI, MATCH, CAMPIONATI.
  * Style: GOLDBET DATABASE (OLED Black + Cyan Neon).
- * Feature: Global Smart Signal (Rome Time), Engine Shield, Smart Sync Resume.
- * Fix: Mobile JSON Headers, No-Backtick UI, 10.5px Font, ✖️ Close Buttons.
+ * Feature: Smart Sync (Std vs Extra), Engine Shield Safety, Rome Time.
+ * Fix: Future Season Bug, Extra Season Loop Fix, Visual Cards, ✖️ Buttons.
  */
 
 const FALLBACK_CONFIG = {
@@ -157,14 +157,14 @@ async function handleAdminStatus(env, h) {
   return new Response(JSON.stringify({ total: total.c, staged: staged.c, unknown: unknown.results, teams: teams.results, ignored: ignored.results.map(i => i.id), lastUpdate: signal ? signal.value : "MAI" }), { headers: h });
 }
 
-// --- ENGINE DOWNLOAD ---
+// --- ENGINE DOWNLOAD (STRICT STAGING) ---
 
 async function fetchAndProcess(url, league, env, fullFile = false, seasonParam = null) {
   try {
     const curS = seasonParam || getCurrentSeason();
     if (curS !== getCurrentSeason()) {
       const check = await env.DB.prepare("SELECT COUNT(*) as c FROM matches WHERE div = ? AND season = ?").bind(league.id, curS).first();
-      if (check.c > 0) return { success: true, status: 200, rows: 0, skipped: true };
+      if (check && check.c > 0) return { success: true, status: 200, rows: 0, skipped: true };
     }
 
     const headers = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Referer": "https://www.football-data.co.uk/" };
@@ -196,11 +196,13 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
     }
 
     let needsEngineReset = false;
-    if (matchIdsInFile.length > 0) {
-      const placeholders = matchIdsInFile.map(() => "?").join(",");
-      const checkArchivio = await env.DB.prepare("SELECT COUNT(*) as c FROM archivio_elaborato WHERE id IN (" + placeholders + ")").bind(...matchIdsInFile).first();
-      if (checkArchivio && checkArchivio.c > 0) needsEngineReset = true;
-    }
+    try {
+      if (matchIdsInFile.length > 0) {
+        const placeholders = matchIdsInFile.map(() => "?").join(",");
+        const checkArchivio = await env.DB.prepare("SELECT COUNT(*) as c FROM archivio_elaborato WHERE id IN (" + placeholders + ")").bind(...matchIdsInFile).first();
+        if (checkArchivio && checkArchivio.c > 0) needsEngineReset = true;
+      }
+    } catch(e) { /* Engine tables not ready yet */ }
 
     for (const name of uniqueNamesInFile) {
       if (!aliasMap.has(name)) {
@@ -322,6 +324,7 @@ function generateHTML() {
 "        .card-red { background: #ef4444; color: #fff; border-radius: 50%; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; font-weight: 900; font-size: 10px; }",
 "        .btn { padding: 8px 14px; border-radius: 6px; border: none; cursor: pointer; font-weight: 800; font-size: 11px; transition: 0.2s; text-transform: uppercase; }",
 "        .btn-primary { background: #22d3ee; color: #000; }",
+"        .btn-primary:hover { background: #67e8f9; }",
 "        .btn-success { background: #22c55e; color: #000; }",
 "        .btn-danger { background: #ef4444; color: #fff; }",
 "        .btn-warning { background: #facc15; color: #000; }",
