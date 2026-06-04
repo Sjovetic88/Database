@@ -1,9 +1,9 @@
 /**
- * FOOTBALL DATA HUB PRO - v5.25.0 "THE SENTINEL - ENGINE SHIELD PRO"
+ * FOOTBALL DATA HUB PRO - v5.26.0 "THE MASTER ARCHITECT - UNIVERSAL LINK"
  * 4 Moduli: ADMIN, NOMI, MATCH, CAMPIONATI.
  * Style: GOLDBET DATABASE (OLED Black + Cyan Neon).
- * Feature: Deterministic Engine Reset, Rome Timezone, Smart Sync Resume.
- * Fix: 10.5px Font, Visual Cards, ✖️ Close Buttons, No-Backtick UI.
+ * Feature: Engine Country Mapping, Smart Sync Resume, Visual Cards.
+ * Fix: Engine Reset Link, 10.5px Font, ✖️ Close Buttons, No-Backtick UI.
  */
 
 const FALLBACK_CONFIG = {
@@ -74,12 +74,13 @@ async function updateSignal(env, force = false) {
   }
 }
 
-async function triggerEngineReset(env, country) {
+async function triggerEngineReset(env, engineCountry) {
+  if (!engineCountry) return;
   try {
     await env.DB.batch([
-      env.DB.prepare("DELETE FROM archivio_elaborato WHERE nazione = ?").bind(country),
-      env.DB.prepare("UPDATE classifica_elite SET elo = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0 WHERE nazione = ?").bind(country),
-      env.DB.prepare("UPDATE stato_nazioni SET completato = 1 WHERE nazione = ?").bind(country)
+      env.DB.prepare("DELETE FROM archivio_elaborato WHERE nazione = ?").bind(engineCountry),
+      env.DB.prepare("UPDATE classifica_elite SET elo = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0 WHERE nazione = ?").bind(engineCountry),
+      env.DB.prepare("UPDATE stato_nazioni SET completato = 1 WHERE nazione = ?").bind(engineCountry)
     ]);
   } catch (e) { /* Engine tables might not exist yet */ }
 }
@@ -93,27 +94,27 @@ async function handleGetLeagues(env, h) {
 
 async function handleAddLeague(request, env, h) {
   const l = await request.json();
-  await env.DB.prepare("INSERT OR REPLACE INTO leagues (id, name, country, color, text_color, type, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)")
-    .bind(l.id, l.name, l.country.toUpperCase(), l.color, l.text_color, l.type).run();
+  await env.DB.prepare("INSERT OR REPLACE INTO leagues (id, name, country, engine_country, color, text_color, type, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, 1)")
+    .bind(l.id, l.name, l.country, l.engine_country, l.color, l.text_color, l.type).run();
   return new Response(JSON.stringify({ success: true }), { headers: h });
 }
 
 async function handleDeleteLeague(request, env, h) {
   const { id } = await request.json();
-  const league = await env.DB.prepare("SELECT country FROM leagues WHERE id = ?").bind(id).first();
+  const league = await env.DB.prepare("SELECT engine_country FROM leagues WHERE id = ?").bind(id).first();
   await env.DB.prepare("DELETE FROM matches WHERE div = ?").bind(id).run();
   await env.DB.prepare("DELETE FROM staged_matches WHERE div = ?").bind(id).run();
   await env.DB.prepare("UPDATE leagues SET is_active = 0 WHERE id = ?").bind(id).run();
-  if (league) await triggerEngineReset(env, league.country);
+  if (league && league.engine_country) await triggerEngineReset(env, league.engine_country);
   await updateSignal(env, true);
   return new Response(JSON.stringify({ success: true }), { headers: h });
 }
 
 async function handleRestoreLeague(request, env, h) {
   const { id } = await request.json();
-  const league = await env.DB.prepare("SELECT country FROM leagues WHERE id = ?").bind(id).first();
+  const league = await env.DB.prepare("SELECT engine_country FROM leagues WHERE id = ?").bind(id).first();
   await env.DB.prepare("UPDATE leagues SET is_active = 1 WHERE id = ?").bind(id).run();
-  if (league) await triggerEngineReset(env, league.country);
+  if (league && league.engine_country) await triggerEngineReset(env, league.engine_country);
   await updateSignal(env, true);
   return new Response(JSON.stringify({ success: true }), { headers: h });
 }
@@ -199,12 +200,24 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
     const allTeams = teamsData.results;
 
     const uniqueNamesInFile = new Set();
+    const matchIdsInFile = [];
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i].split(","); if (r.length < 5) continue;
       const h = r[colMap.h] ? r[colMap.h].trim().toUpperCase() : null;
       const a = r[colMap.a] ? r[colMap.a].trim().toUpperCase() : null;
       if (h) uniqueNamesInFile.add(h); if (a) uniqueNamesInFile.add(a);
+      const hId = aliasMap.get(h), aId = aliasMap.get(a);
+      if (hId && aId) matchIdsInFile.push(curS + "_" + league.id + "_" + hId + "_" + aId);
     }
+
+    let needsEngineReset = false;
+    try {
+      if (matchIdsInFile.length > 0) {
+        const placeholders = matchIdsInFile.map(() => "?").join(",");
+        const checkArchivio = await env.DB.prepare("SELECT COUNT(*) as c FROM archivio_elaborato WHERE id IN (" + placeholders + ")").bind(...matchIdsInFile).first();
+        if (checkArchivio && checkArchivio.c > 0) needsEngineReset = true;
+      }
+    } catch(e) { }
 
     for (const name of uniqueNamesInFile) {
       if (!aliasMap.has(name)) {
@@ -221,6 +234,12 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
 
     let totalChanges = 0;
     const batch = [];
+    if (needsEngineReset && league.engine_country) {
+      batch.push(env.DB.prepare("DELETE FROM archivio_elaborato WHERE nazione = ?").bind(league.engine_country));
+      batch.push(env.DB.prepare("UPDATE classifica_elite SET elo = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0 WHERE nazione = ?").bind(league.engine_country));
+      batch.push(env.DB.prepare("UPDATE stato_nazioni SET completato = 1 WHERE nazione = ?").bind(league.engine_country));
+    }
+
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i].split(","); if (r.length < 5) continue;
       const getVal = (key) => (colMap[key] !== -1 && r[colMap[key]]) ? r[colMap[key]].trim().toUpperCase() : null;
@@ -243,7 +262,7 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
     }
     if (batch.length > 0) { const resBatch = await env.DB.batch(batch); resBatch.forEach(r => { if(r.meta.changes) totalChanges += r.meta.changes; }); }
     await env.DB.prepare("UPDATE matches SET id = season || '_' || div || '_' || home_team_id || '_' || away_team_id WHERE home_team_id IS NOT NULL AND away_team_id IS NOT NULL").run();
-    await updateSignal(env, totalChanges || 1);
+    await updateSignal(env, totalChanges || (needsEngineReset ? 1 : 0));
     return { success: true, status: resp.status, rows: rows.length - 1, staged: (uniqueNamesInFile.size > aliasMap.size), changes: totalChanges };
   } catch (e) { return { success: false, status: 500, error: e.message }; }
 }
@@ -292,7 +311,7 @@ function generateHTML() {
 "<head>",
 "    <meta charset='UTF-8'>",
 "    <meta name='viewport' content='width=device-width, initial-scale=1.0'>",
-"    <title>GOLDBET DATABASE v5.25.0</title>",
+"    <title>GOLDBET DATABASE v5.26.0</title>",
 "    <script src='https://cdn.tailwindcss.com'></script>",
 "    <style>",
 "        body { font-family: sans-serif; margin: 0; background: #000; font-size: 12px; color: #d4d4d8; }",
@@ -385,10 +404,11 @@ function generateHTML() {
 "            <span class='close-x' onclick=\"toggleModal('leaguesModal')\">✖️</span>",
 "            <h2 class='text-xl font-black mb-4'>🏆 GESTIONE CAMPIONATI</h2>",
 "            <div class='bg-zinc-900 p-4 rounded-lg border border-zinc-800 mb-6'>",
-"                <div class='grid grid-cols-3 gap-3 mb-3'>",
+"                <div class='grid grid-cols-4 gap-3 mb-3'>",
 "                    <div>ID: <input type='text' id='lId' class='w-full'></div>",
 "                    <div>NOME: <input type='text' id='lName' class='w-full'></div>",
-"                    <div>NAZIONE: <input type='text' id='lCountry' oninput='this.value=this.value.toUpperCase()' class='w-full'></div>",
+"                    <div>NAZIONE: <input type='text' id='lCountry' class='w-full'></div>",
+"                    <div>NOME ENGINE: <input type='text' id='lEngine' placeholder='es: Italy' class='w-full'></div>",
 "                </div>",
 "                <div class='grid grid-cols-4 gap-3'>",
 "                    <div>SFONDO: <input type='color' id='lColor' oninput=\"document.getElementById('lHex').value=this.value\" class='w-full h-8'></div>",
@@ -522,7 +542,7 @@ function generateHTML() {
 "            for(var i=0; i<data.length; i++) {",
 "                var l = data[i];",
 "                if(l.is_active) {",
-"                    activeHtml += \"<tr class='border-b border-zinc-800'><td><span class='div-tag' style='background:\"+l.color+\"; color:\"+l.text_color+\"'>\"+l.id+\"</span></td><td>\"+l.id+\"</td><td>\"+l.name+\"</td><td><button class='btn btn-primary' onclick=\\\"editLeague('\"+l.id+\"','\"+l.name.replace(/'/g,\"\\\\'\")+\"','\"+l.country.replace(/'/g,\"\\\\'\")+\"','\"+l.color+\"','\"+l.text_color+\"','\"+l.type+\"')\\\">✏️</button> <button class='btn btn-warning ml-1' onclick=\\\"startSync('single','\"+l.id+\"')\\\">♻️</button> <button class='btn btn-danger ml-1' onclick=\\\"deleteLeague('\"+l.id+\"')\\\">🗑️</button></td></tr>\";",
+"                    activeHtml += \"<tr class='border-b border-zinc-800'><td><span class='div-tag' style='background:\"+l.color+\"; color:\"+l.text_color+\"'>\"+l.id+\"</span></td><td>\"+l.id+\"</td><td>\"+l.name+\"</td><td><button class='btn btn-primary' onclick=\\\"editLeague('\"+l.id+\"','\"+l.name.replace(/'/g,\"\\\\'\")+\"','\"+l.country.replace(/'/g,\"\\\\'\")+\"','\"+l.engine_country+\"','\"+l.color+\"','\"+l.text_color+\"','\"+l.type+\"')\\\">✏️</button> <button class='btn btn-warning ml-1' onclick=\\\"startSync('single','\"+l.id+\"')\\\">♻️</button> <button class='btn btn-danger ml-1' onclick=\\\"deleteLeague('\"+l.id+\"')\\\">🗑️</button></td></tr>\";",
 "                } else {",
 "                    archHtml += \"<tr class='border-b border-zinc-800'><td>\"+l.id+\"</td><td>\"+l.name+\"</td><td><button class='btn btn-success' onclick=\\\"restoreLeague('\"+l.id+\"')\\\">RIPRISTINA</button></td></tr>\";",
 "                }",
@@ -531,12 +551,12 @@ function generateHTML() {
 "            document.getElementById('archivedList').innerHTML = archHtml + \"</tbody></table>\";",
 "            if(document.getElementById('leaguesModal').style.display !== 'block') toggleModal('leaguesModal');",
 "        }",
-"        function editLeague(id, name, country, color, textColor, type) { document.getElementById('lId').value = id; document.getElementById('lName').value = name; document.getElementById('lCountry').value = country; document.getElementById('lColor').value = color; document.getElementById('lHex').value = color; document.getElementById('lTextColor').value = textColor; document.getElementById('lType').value = type; }",
+"        function editLeague(id, name, country, engine, color, textColor, type) { document.getElementById('lId').value = id; document.getElementById('lName').value = name; document.getElementById('lCountry').value = country; document.getElementById('lEngine').value = engine; document.getElementById('lColor').value = color; document.getElementById('lHex').value = color; document.getElementById('lTextColor').value = textColor; document.getElementById('lType').value = type; }",
 "        async function addLeague() {",
-"            var l = { id: document.getElementById('lId').value, name: document.getElementById('lName').value, country: document.getElementById('lCountry').value, color: document.getElementById('lColor').value, text_color: document.getElementById('lTextColor').value, type: document.getElementById('lType').value };",
+"            var l = { id: document.getElementById('lId').value, name: document.getElementById('lName').value, country: document.getElementById('lCountry').value, engine_country: document.getElementById('lEngine').value, color: document.getElementById('lColor').value, text_color: document.getElementById('lTextColor').value, type: document.getElementById('lType').value };",
 "            if(!l.id || !l.name) return alert('Compila i campi!');",
 "            await fetch('/api/admin/add-league', { method:'POST', body: JSON.stringify(l) });",
-"            document.getElementById('lId').value=''; document.getElementById('lName').value=''; document.getElementById('lCountry').value='';",
+"            document.getElementById('lId').value=''; document.getElementById('lName').value=''; document.getElementById('lCountry').value=''; document.getElementById('lEngine').value='';",
 "            openLeagues(); initApp();",
 "        }",
 "        async function deleteLeague(id) { if(!confirm('Eliminare partite e archiviare lega?')) return; await fetch('/api/admin/delete-league', { method:'POST', body: JSON.stringify({id:id}) }); openLeagues(); initApp(); }",
