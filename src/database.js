@@ -1,9 +1,9 @@
 /**
- * FOOTBALL DATA HUB PRO - v5.26.0 "THE MASTER ARCHITECT - UNIVERSAL LINK"
+ * FOOTBALL DATA HUB PRO - v5.26.1 "THE SENTINEL - SCHEMA ALIGNED"
  * 4 Moduli: ADMIN, NOMI, MATCH, CAMPIONATI.
  * Style: GOLDBET DATABASE (OLED Black + Cyan Neon).
- * Feature: Engine Country Mapping, Smart Sync Resume, Visual Cards.
- * Fix: Engine Reset Link, 10.5px Font, ✖️ Close Buttons, No-Backtick UI.
+ * Feature: Engine Shield (match_id fix), Schema Aligned (elo_raw/perf), Rome Time.
+ * Fix: Total Reset Fix, 10.5px Font, ✖️ Close Buttons, No-Backtick UI.
  */
 
 const FALLBACK_CONFIG = {
@@ -79,10 +79,10 @@ async function triggerEngineReset(env, engineCountry) {
   try {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM archivio_elaborato WHERE nazione = ?").bind(engineCountry),
-      env.DB.prepare("UPDATE classifica_elite SET elo = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0 WHERE nazione = ?").bind(engineCountry),
+      env.DB.prepare("UPDATE classifica_elite SET elo_raw = 1200, elo_perf = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0 WHERE nazione = ?").bind(engineCountry),
       env.DB.prepare("UPDATE stato_nazioni SET completato = 1 WHERE nazione = ?").bind(engineCountry)
     ]);
-  } catch (e) { /* Engine tables might not exist yet */ }
+  } catch (e) { }
 }
 
 // --- GESTIONE LEAGUES ---
@@ -214,7 +214,7 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
     try {
       if (matchIdsInFile.length > 0) {
         const placeholders = matchIdsInFile.map(() => "?").join(",");
-        const checkArchivio = await env.DB.prepare("SELECT COUNT(*) as c FROM archivio_elaborato WHERE id IN (" + placeholders + ")").bind(...matchIdsInFile).first();
+        const checkArchivio = await env.DB.prepare("SELECT COUNT(*) as c FROM archivio_elaborato WHERE match_id IN (" + placeholders + ")").bind(...matchIdsInFile).first();
         if (checkArchivio && checkArchivio.c > 0) needsEngineReset = true;
       }
     } catch(e) { }
@@ -236,7 +236,7 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
     const batch = [];
     if (needsEngineReset && league.engine_country) {
       batch.push(env.DB.prepare("DELETE FROM archivio_elaborato WHERE nazione = ?").bind(league.engine_country));
-      batch.push(env.DB.prepare("UPDATE classifica_elite SET elo = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0 WHERE nazione = ?").bind(league.engine_country));
+      batch.push(env.DB.prepare("UPDATE classifica_elite SET elo_raw = 1200, elo_perf = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0 WHERE nazione = ?").bind(league.engine_country));
       batch.push(env.DB.prepare("UPDATE stato_nazioni SET completato = 1 WHERE nazione = ?").bind(league.engine_country));
     }
 
@@ -296,7 +296,7 @@ async function handleTransferInternal(env) {
 }
 
 async function handleTransfer(env, h) { await handleTransferInternal(env); return new Response(JSON.stringify({ success: true }), { headers: h }); }
-async function handleReset(request, env, h) { const { password } = await request.json(); if (password !== FALLBACK_CONFIG.ADMIN_PASSWORD) return new Response("Error", { status: 403 }); await env.DB.batch([env.DB.prepare("DELETE FROM matches"), env.DB.prepare("DELETE FROM staged_matches"), env.DB.prepare("DELETE FROM ignored_duplicates"), env.DB.prepare("DELETE FROM archivio_elaborato"), env.DB.prepare("UPDATE classifica_elite SET elo = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0"), env.DB.prepare("UPDATE stato_nazioni SET completato = 1")]); await updateSignal(env, true); return new Response(JSON.stringify({ success: true }), { headers: h }); }
+async function handleReset(request, env, h) { const { password } = await request.json(); if (password !== FALLBACK_CONFIG.ADMIN_PASSWORD) return new Response("Error", { status: 403 }); await env.DB.batch([env.DB.prepare("DELETE FROM matches"), env.DB.prepare("DELETE FROM staged_matches"), env.DB.prepare("DELETE FROM ignored_duplicates"), env.DB.prepare("DELETE FROM archivio_elaborato"), env.DB.prepare("UPDATE classifica_elite SET elo_raw = 1200, elo_perf = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0"), env.DB.prepare("UPDATE stato_nazioni SET completato = 1")]); await updateSignal(env, true); return new Response(JSON.stringify({ success: true }), { headers: h }); }
 async function handleValidate(request, env, h) { const { original, targetId, isNew, country } = await request.json(); const cleanName = original.trim().toUpperCase(); if (isNew) { const res = await env.DB.prepare("INSERT INTO teams (name, country) VALUES (?, ?)").bind(cleanName, country.toUpperCase()).run(); await env.DB.prepare("INSERT INTO team_aliases (alias, team_id) VALUES (?, ?)").bind(cleanName, res.meta.last_row_id).run(); } else await env.DB.prepare("INSERT INTO team_aliases (alias, team_id) VALUES (?, ?)").bind(cleanName, targetId).run(); await handleTransferInternal(env); return new Response(JSON.stringify({ success: true }), { headers: h }); }
 async function handleUpdateTeamCountry(request, env, h) { const { teamId, newCountry } = await request.json(); await env.DB.prepare("UPDATE teams SET country = ? WHERE id = ?").bind(newCountry.toUpperCase(), teamId).run(); await updateSignal(env, true); return new Response(JSON.stringify({ success: true }), { headers: h }); }
 async function handleMerge(request, env, h) { const { sourceId, targetId } = await request.json(); const team = await env.DB.prepare("SELECT country FROM teams WHERE id = ?").bind(targetId).first(); await env.DB.batch([ env.DB.prepare("UPDATE team_aliases SET team_id = ? WHERE team_id = ?").bind(targetId, sourceId), env.DB.prepare("UPDATE matches SET home_team_id = ? WHERE home_team_id = ?").bind(targetId, sourceId), env.DB.prepare("UPDATE matches SET away_team_id = ? WHERE away_team_id = ?").bind(targetId, sourceId), env.DB.prepare("DELETE FROM teams WHERE id = ?").bind(sourceId) ]); if (team) await triggerEngineReset(env, team.country); await updateSignal(env, true); return new Response(JSON.stringify({ success: true }), { headers: h }); }
@@ -311,7 +311,7 @@ function generateHTML() {
 "<head>",
 "    <meta charset='UTF-8'>",
 "    <meta name='viewport' content='width=device-width, initial-scale=1.0'>",
-"    <title>GOLDBET DATABASE v5.26.0</title>",
+"    <title>GOLDBET DATABASE v5.25.0</title>",
 "    <script src='https://cdn.tailwindcss.com'></script>",
 "    <style>",
 "        body { font-family: sans-serif; margin: 0; background: #000; font-size: 12px; color: #d4d4d8; }",
@@ -339,6 +339,7 @@ function generateHTML() {
 "        .card-red { background: #ef4444; color: #fff; border-radius: 50%; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; font-weight: 900; font-size: 10px; }",
 "        .btn { padding: 8px 14px; border-radius: 6px; border: none; cursor: pointer; font-weight: 800; font-size: 11px; transition: 0.2s; text-transform: uppercase; }",
 "        .btn-primary { background: #22d3ee; color: #000; }",
+"        .btn-primary:hover { background: #67e8f9; }",
 "        .btn-success { background: #22c55e; color: #000; }",
 "        .btn-danger { background: #ef4444; color: #fff; }",
 "        .btn-warning { background: #facc15; color: #000; }",
