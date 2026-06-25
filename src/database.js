@@ -1,9 +1,31 @@
 /**
- * FOOTBALL DATA HUB PRO - v5.26.1 "THE SENTINEL - SCHEMA ALIGNED"
- * 4 Moduli: ADMIN, NOMI, MATCH, CAMPIONATI.
- * Style: GOLDBET DATABASE (OLED Black + Cyan Neon).
- * Feature: Engine Shield (match_id fix), Schema Aligned (elo_raw/perf), Rome Time.
- * Fix: Total Reset Fix, 10.5px Font, ✖️ Close Buttons, No-Backtick UI.
+ * ==============================================================================
+ * PROGETTO: GOLDBET DATABASE - v5.27.0 "THE MASTER ARCHITECT - FORCE SYNC"
+ * ==============================================================================
+ * 
+ * DESCRIZIONE TECNICA:
+ * Questo Worker gestisce l'intera infrastruttura di acquisizione dati (Downloader)
+ * per un sistema di analisi statistica calcistica. Scarica file CSV da 
+ * football-data.co.uk e li processa in un database Cloudflare D1.
+ * 
+ * ARCHITETTURA TABELLE (D1):
+ * 1. leagues: Configurazione campionati (id, name, country, engine_country, color, text_color, type, is_active).
+ * 2. matches: Tabella produzione (Risultati finali e statistiche).
+ * 3. staged_matches: "Diga" di attesa per match con squadre non ancora validate.
+ * 4. teams: Anagrafica squadre (id, name, country).
+ * 5. team_aliases: Dizionario che mappa i nomi grezzi dei CSV agli ID ufficiali.
+ * 6. name_abbreviations: Dizionario per abbreviare i nomi lunghi solo in visualizzazione.
+ * 7. ignored_duplicates: Whitelist per lo scanner dei nomi simili.
+ * 8. system_status: Segnale di sincronizzazione per worker esterni (LAST_UPDATE).
+ * 9. archivio_elaborato / classifica_elite / stato_nazioni: Tabelle gestite dal Modulo 2 (Engine).
+ * 
+ * LOGICHE CHIAVE:
+ * - SMART ROUTING: Se le squadre sono note, il match va in 'matches'. Se ignote, va in 'staged_matches'.
+ * - ENGINE SHIELD: Se un match aggiornato esiste già nell'archivio dell'Engine, resetta la nazione.
+ * - FORCE SYNC: I comandi manuali (♻️) ignorano lo skip delle stagioni passate per forzare l'update.
+ * - PRE-SCAN CPU: Analizza i nomi unici prima del calcolo Levenshtein per evitare blocchi 10ms.
+ * - ROME TIMEZONE: Ogni timestamp è sincronizzato con l'orario di Roma (Europe/Rome).
+ * ==============================================================================
  */
 
 const FALLBACK_CONFIG = {
@@ -19,8 +41,11 @@ export default {
     const p = url.pathname;
     const h = { "Content-Type": "application/json" };
     try {
+      // API Pubbliche e Configurazione
       if (p === "/api/leagues") return await handleGetLeagues(env, h);
       if (p === "/api/matches") return await handleGetMatches(url, env, h);
+      
+      // API Amministrazione e Gestione Dati
       if (p === "/api/admin/status") return await handleAdminStatus(env, h);
       if (p === "/api/admin/league-status") return await handleLeagueStatus(env, h);
       if (p === "/api/admin/validate") return await handleValidate(request, env, h);
@@ -41,11 +66,13 @@ export default {
       return new Response(generateHTML(), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
     } catch (e) { return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: h }); }
   },
+  // Ciclo automatico ogni minuto (Round-Robin)
   async scheduled(event, env) { await handleAutomatedUpdate(env); }
 };
 
-// --- UTILS ---
+// --- UTILS MATEMATICI E DI CALCOLO ---
 
+// Calcola la somiglianza tra due stringhe (Algoritmo Levenshtein)
 function getSimilarity(a, b) {
   if (!a || !b) return 0;
   a = a.toLowerCase(); b = b.toLowerCase();
@@ -61,12 +88,14 @@ function getSimilarity(a, b) {
   return 1 - (matrix[b.length][a.length] / Math.max(a.length, b.length));
 }
 
+// Calcola la stagione attuale nel formato football-data (es. 2425)
 function getCurrentSeason() {
   const now = new Date();
   const year = now.getFullYear();
   return now.getMonth() >= 6 ? String(year).slice(-2) + String(year + 1).slice(-2) : String(year - 1).slice(-2) + String(year).slice(-2);
 }
 
+// Aggiorna il segnale orario di Roma per i worker successivi
 async function updateSignal(env, force = false) {
   if (force) {
     const ts = new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" });
@@ -74,6 +103,7 @@ async function updateSignal(env, force = false) {
   }
 }
 
+// Resetta i calcoli dell'Engine per una specifica nazione (Modulo 2 Shield)
 async function triggerEngineReset(env, engineCountry) {
   if (!engineCountry) return;
   try {
@@ -82,7 +112,7 @@ async function triggerEngineReset(env, engineCountry) {
       env.DB.prepare("UPDATE classifica_elite SET elo_raw = 1200, elo_perf = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0 WHERE nazione = ?").bind(engineCountry),
       env.DB.prepare("UPDATE stato_nazioni SET completato = 1 WHERE nazione = ?").bind(engineCountry)
     ]);
-  } catch (e) { }
+  } catch (e) { /* Tabelle Engine non ancora create */ }
 }
 
 // --- GESTIONE LEAGUES ---
@@ -95,7 +125,7 @@ async function handleGetLeagues(env, h) {
 async function handleAddLeague(request, env, h) {
   const l = await request.json();
   await env.DB.prepare("INSERT OR REPLACE INTO leagues (id, name, country, engine_country, color, text_color, type, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, 1)")
-    .bind(l.id, l.name, l.country, l.engine_country, l.color, l.text_color, l.type).run();
+    .bind(l.id, l.name, l.country.toUpperCase(), l.engine_country, l.color, l.text_color, l.type).run();
   return new Response(JSON.stringify({ success: true }), { headers: h });
 }
 
@@ -172,12 +202,15 @@ async function handleAdminStatus(env, h) {
   return new Response(JSON.stringify({ total: total.c, staged: staged.c, unknown: unknown.results, teams: teams.results, ignored: ignored.results.map(i => i.id), lastUpdate: signal ? signal.value : "MAI" }), { headers: h });
 }
 
-// --- ENGINE DOWNLOAD ---
+// --- ENGINE DOWNLOAD (FORCE SYNC LOGIC) ---
 
 async function fetchAndProcess(url, league, env, fullFile = false, seasonParam = null) {
   try {
     const curS = seasonParam || getCurrentSeason();
-    if (curS !== getCurrentSeason()) {
+    
+    // SMART SKIP: Attivo solo per campionati Standard durante il Cron automatico.
+    // Se fullFile è true (Sync Manuale) o se la lega è Extra, lo skip viene ignorato.
+    if (!fullFile && league.type === "std" && curS !== getCurrentSeason()) {
       const check = await env.DB.prepare("SELECT COUNT(*) as c FROM matches WHERE div = ? AND season = ?").bind(league.id, curS).first();
       if (check && check.c > 0) return { success: true, status: 200, rows: 0, skipped: true };
     }
@@ -187,6 +220,8 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
     if (!resp.ok) return { success: false, status: resp.status, rows: 0 };
     const text = await resp.text();
     let rows = text.split("\n").map(r => r.trim()).filter(r => r);
+    
+    // Se non è un caricamento completo, scarica solo le ultime 300 righe
     if (!fullFile && league.type === "extra" && rows.length > 300) { rows = [rows[0]].concat(rows.slice(-300)); }
     
     const headersCsv = rows[0].split(",").map(h => h.trim().toLowerCase());
@@ -199,6 +234,7 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
     const teamsData = await env.DB.prepare("SELECT id, name FROM teams").all();
     const allTeams = teamsData.results;
 
+    // PRE-SCAN NOMI UNICI (Ottimizzazione CPU)
     const uniqueNamesInFile = new Set();
     const matchIdsInFile = [];
     for (let i = 1; i < rows.length; i++) {
@@ -210,6 +246,7 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
       if (hId && aId) matchIdsInFile.push(curS + "_" + league.id + "_" + hId + "_" + aId);
     }
 
+    // ENGINE SHIELD: Reset se stiamo modificando il passato già elaborato
     let needsEngineReset = false;
     try {
       if (matchIdsInFile.length > 0) {
@@ -219,6 +256,7 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
       }
     } catch(e) { }
 
+    // AUTO-ADD SQUADRE NUOVE (<40% somiglianza)
     for (const name of uniqueNamesInFile) {
       if (!aliasMap.has(name)) {
         let bestScore = 0;
@@ -311,7 +349,7 @@ function generateHTML() {
 "<head>",
 "    <meta charset='UTF-8'>",
 "    <meta name='viewport' content='width=device-width, initial-scale=1.0'>",
-"    <title>GOLDBET DATABASE v5.25.0</title>",
+"    <title>GOLDBET DATABASE v5.27.0</title>",
 "    <script src='https://cdn.tailwindcss.com'></script>",
 "    <style>",
 "        body { font-family: sans-serif; margin: 0; background: #000; font-size: 12px; color: #d4d4d8; }",
@@ -408,7 +446,7 @@ function generateHTML() {
 "                <div class='grid grid-cols-4 gap-3 mb-3'>",
 "                    <div>ID: <input type='text' id='lId' class='w-full'></div>",
 "                    <div>NOME: <input type='text' id='lName' class='w-full'></div>",
-"                    <div>NAZIONE: <input type='text' id='lCountry' class='w-full'></div>",
+"                    <div>NAZIONE: <input type='text' id='lCountry' oninput='this.value=this.value.toUpperCase()' class='w-full'></div>",
 "                    <div>NOME ENGINE: <input type='text' id='lEngine' placeholder='es: Italy' class='w-full'></div>",
 "                </div>",
 "                <div class='grid grid-cols-4 gap-3'>",
