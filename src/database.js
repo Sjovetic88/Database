@@ -1,9 +1,26 @@
 /**
- * FOOTBALL DATA HUB PRO - v5.31.0 "THE GUARDIAN'S FOUNDATION - RESTORED"
- * 5 Moduli: ADMIN, NOMI, MATCH, CAMPIONATI, QUARANTENA.
- * Style: GOLDBET DATABASE (OLED Black + Cyan Neon).
- * Feature: Anomaly Quarantine 🛡️, Engine Shield, Smart Sync Resume.
- * Fix: Scotland/Spain Bug, 10.5px Font, ✖️ Close Buttons, No-Backtick UI.
+ * ==============================================================================
+ * PROGETTO: GOLDBET DATABASE - v5.32.0 "THE GUARDIAN - SMART SHIELD"
+ * ==============================================================================
+ * 
+ * DESCRIZIONE:
+ * Worker centrale per l'acquisizione, normalizzazione e protezione dei dati.
+ * Gestisce il download dei CSV da football-data.co.uk e l'integrità del DB D1.
+ * 
+ * MODULI INTEGRATI:
+ * 1. MATCH (⚽): Monitoraggio avanzamento dati (Produzione vs Diga).
+ * 2. NOMI (🔠): Validazione squadre, scanner doppioni e abbreviazioni visive.
+ * 3. CAMPIONATI (🏆): Gestione dinamica delle leghe (Attive/Archiviate).
+ * 4. QUARANTENA (🛡️): Isolamento automatico di match con anomalie geografiche.
+ * 5. ADMIN (⚙️): Sincronizzazione massiva, Reset e segnali per Worker esterni.
+ * 
+ * LOGICHE DI PROTEZIONE:
+ * - SMART SYNC: Salta stagioni passate già presenti. Forza update su manuale.
+ * - ENGINE SHIELD: Rileva modifiche retroattive e resetta l'Engine (Modulo 2).
+ * - SMART QUARANTENA: Confronto nazioni "Emoji-Agnostic" (ignora bandiere).
+ * - PRE-SCAN CPU: Analisi nomi unici per evitare il blocco 10ms di Cloudflare.
+ * - ROME TIME: Timestamp sincronizzati con l'orario italiano (Europe/Rome).
+ * ==============================================================================
  */
 
 const FALLBACK_CONFIG = {
@@ -47,6 +64,11 @@ export default {
 };
 
 // --- UTILS ---
+
+function normalizeCountry(c) {
+  if (!c) return "";
+  return c.replace(/[\u{1F1E6}-\u{1F1FF}]{2}/gu, "").trim().toUpperCase();
+}
 
 function getSimilarity(a, b) {
   if (!a || !b) return 0;
@@ -175,7 +197,7 @@ async function handleAdminStatus(env, h) {
   return new Response(JSON.stringify({ total: total.c, staged: staged.c, unknown: unknown.results, teams: teams.results, ignored: ignored.results.map(i => i.id), lastUpdate: signal ? signal.value : "MAI", quarantine: quarantine.c }), { headers: h });
 }
 
-// --- ENGINE DOWNLOAD (QUARANTINE & SMART SKIP) ---
+// --- ENGINE DOWNLOAD (SMART SHIELD) ---
 
 async function fetchAndProcess(url, league, env, fullFile = false, seasonParam = null) {
   try {
@@ -265,8 +287,8 @@ async function fetchAndProcess(url, league, env, fullFile = false, seasonParam =
       if (hId && aId) {
         const prodId = s + "_" + league.id + "_" + hId + "_" + aId + "_" + dateId;
         const hTeam = teamsMap.get(hId), aTeam = teamsMap.get(aId);
-        const hAnom = (hTeam && hTeam.country !== league.country && !exceptions.has(hId + "_" + league.id));
-        const aAnom = (aTeam && aTeam.country !== league.country && !exceptions.has(aId + "_" + league.id));
+        const hAnom = (hTeam && normalizeCountry(hTeam.country) !== normalizeCountry(league.country) && !exceptions.has(hId + "_" + league.id));
+        const aAnom = (aTeam && normalizeCountry(aTeam.country) !== normalizeCountry(league.country) && !exceptions.has(aId + "_" + league.id));
         
         if (hAnom || aAnom) {
           batch.push(env.DB.prepare("INSERT OR REPLACE INTO quarantine_matches " + sqlFields + " " + sqlPlaceholders).bind(prodId, ...commonValues, hId, aId));
@@ -333,13 +355,12 @@ async function handleTransferInternal(env) {
   const qInsert = env.DB.prepare("INSERT OR REPLACE INTO matches (id, div, season, date, hometeam, awayteam, fthg, ftag, ftr, hthg, htag, htr, hs, as_stats, hst, ast, hf, af, hc, ac, hy, ay, hr, ar, home_team_id, away_team_id) SELECT s.season || '_' || s.div || '_' || a1.team_id || '_' || a2.team_id || '_' || REPLACE(s.date, '-', ''), s.div, s.season, s.date, s.hometeam, s.awayteam, s.fthg, s.ftag, s.ftr, s.hthg, s.htag, s.htr, s.hs, s.as_stats, s.hst, s.ast, s.hf, s.af, s.hc, s.ac, s.hy, s.ay, s.hr, s.ar, a1.team_id, a2.team_id FROM staged_matches s JOIN team_aliases a1 ON s.hometeam = a1.alias JOIN team_aliases a2 ON s.awayteam = a2.alias WHERE s.hometeam IN (SELECT alias FROM team_aliases) AND s.awayteam IN (SELECT alias FROM team_aliases)");
   const qDelete = env.DB.prepare("DELETE FROM staged_matches WHERE hometeam IN (SELECT alias FROM team_aliases) AND awayteam IN (SELECT alias FROM team_aliases)");
   await env.DB.batch([qInsert, qDelete]);
-  await env.DB.prepare("UPDATE matches SET id = season || '_' || div || '_' || home_team_id || '_' || away_team_id || '_' || REPLACE(date, '-', '') WHERE home_team_id IS NOT NULL AND away_team_id IS NOT NULL").run();
   await updateSignal(env, 1);
 }
 
 async function handleTransfer(env, h) { await handleTransferInternal(env); return new Response(JSON.stringify({ success: true }), { headers: h }); }
 async function handleReset(request, env, h) { const { password } = await request.json(); if (password !== FALLBACK_CONFIG.ADMIN_PASSWORD) return new Response("Error", { status: 403 }); await env.DB.batch([env.DB.prepare("DELETE FROM matches"), env.DB.prepare("DELETE FROM staged_matches"), env.DB.prepare("DELETE FROM ignored_duplicates"), env.DB.prepare("DELETE FROM archivio_elaborato"), env.DB.prepare("UPDATE classifica_elite SET elo_raw = 1200, elo_perf = 1200, attacco = 1.0, difesa = 1.0, partite_giocate = 0, h_factor = 1.1, trend = 0"), env.DB.prepare("UPDATE stato_nazioni SET completato = 1")]); await updateSignal(env, true); return new Response(JSON.stringify({ success: true }), { headers: h }); }
-async function handleValidate(request, env, h) { const { original, targetId, isNew, country } = await request.json(); const cleanName = original.trim().toUpperCase(); if (isNew) { const res = await env.DB.prepare("INSERT INTO teams (name, country) VALUES (?, ?)").bind(cleanName, country.toUpperCase()).run(); await env.DB.prepare("INSERT INTO team_aliases (alias, team_id) VALUES (?, ?)").bind(cleanName, res.meta.last_row_id).run(); } else await env.DB.prepare("INSERT INTO team_aliases (alias, team_id) VALUES (?, ?)").bind(cleanName, targetId).run(); await handleTransferInternal(env); return new Response(JSON.stringify({ success: true }), { headers: h }); }
+async function handleValidate(request, env, h) { const { original, targetId, isNew, country } = await request.json(); const cleanName = original.trim().toUpperCase(); if (isNew) { const res = await env.DB.prepare("INSERT INTO teams (name, country) VALUES (?, ?)").bind(cleanName, country.toUpperCase()).run(); await env.DB.prepare("INSERT INTO team_aliases (alias, team_id) VALUES (?, ?)").bind(cleanName, res.meta.last_row_id).run(); } else await env.DB.prepare("INSERT INTO team_aliases (alias, team_id) VALUES (?, ?)").bind(cleanName, targetId).run(); return new Response(JSON.stringify({ success: true }), { headers: h }); }
 async function handleUpdateTeamCountry(request, env, h) { const { teamId, newCountry } = await request.json(); await env.DB.prepare("UPDATE teams SET country = ? WHERE id = ?").bind(newCountry.toUpperCase(), teamId).run(); await updateSignal(env, true); return new Response(JSON.stringify({ success: true }), { headers: h }); }
 async function handleMerge(request, env, h) { const { sourceId, targetId } = await request.json(); const team = await env.DB.prepare("SELECT country FROM teams WHERE id = ?").bind(targetId).first(); await env.DB.batch([ env.DB.prepare("UPDATE team_aliases SET team_id = ? WHERE team_id = ?").bind(targetId, sourceId), env.DB.prepare("UPDATE matches SET home_team_id = ? WHERE home_team_id = ?").bind(targetId, sourceId), env.DB.prepare("UPDATE matches SET away_team_id = ? WHERE away_team_id = ?").bind(targetId, sourceId), env.DB.prepare("DELETE FROM teams WHERE id = ?").bind(sourceId) ]); if (team) await triggerEngineReset(env, team.country); await updateSignal(env, true); return new Response(JSON.stringify({ success: true }), { headers: h }); }
 async function handleSplit(request, env, h) { const { alias, currentTeamId, country } = await request.json(); const res = await env.DB.prepare("INSERT INTO teams (name, country) VALUES (?, ?)").bind(alias, country.toUpperCase()).run(); const newId = res.meta.last_row_id; await env.DB.batch([ env.DB.prepare("UPDATE team_aliases SET team_id = ? WHERE alias = ?").bind(newId, alias), env.DB.prepare("UPDATE matches SET home_team_id = ? WHERE home_team_id = ? AND hometeam = ?").bind(newId, currentTeamId, alias), env.DB.prepare("UPDATE matches SET away_team_id = ? WHERE away_team_id = ? AND awayteam = ?").bind(newId, currentTeamId, alias) ]); await triggerEngineReset(env, country.toUpperCase()); await updateSignal(env, true); return new Response(JSON.stringify({ success: true }), { headers: h }); }
@@ -354,7 +375,7 @@ function generateHTML() {
 "<head>",
 "    <meta charset='UTF-8'>",
 "    <meta name='viewport' content='width=device-width, initial-scale=1.0'>",
-"    <title>GOLDBET DATABASE v5.31.0</title>",
+"    <title>GOLDBET DATABASE v5.32.0</title>",
 "    <script src='https://cdn.tailwindcss.com'></script>",
 "    <style>",
 "        body { font-family: sans-serif; margin: 0; background: #000; font-size: 12px; color: #d4d4d8; }",
@@ -437,6 +458,7 @@ function generateHTML() {
 "        function toggleModal(id) { var m = document.getElementById(id); m.style.display = (m.style.display==='block')?'none':'block'; }",
 "        function debouncedSearch() { clearTimeout(searchTimeout); searchTimeout = setTimeout(function(){ resetPage(); }, 500); }",
 "        function logConsole(msg, type) { var c = document.getElementById('consoleLog'); var cName = type==='error'?'log-error':(type==='success'?'log-success':''); c.innerHTML += \"<div class='log-line \" + cName + \"'>\" + msg + \"</div>\"; c.scrollTop = c.scrollHeight; }",
+"        function getSeasonsSince2000() { var seasons = []; var now = new Date(); var currentYear = now.getFullYear(); var endYear = now.getMonth() >= 6 ? currentYear : currentYear - 1; for (var y = 2000; y <= endYear; y++) { seasons.push(String(y).slice(-2) + String(y + 1).slice(-2)); } return seasons.reverse(); }",
 "        function formatCard(val, type) { if(!val || val==='0') return '-'; var cls = type==='Y'?'card-yellow':'card-red'; return \"<span class='\"+cls+\"'>\"+val+\"</span>\"; }",
 "        function applyAbbr(name) { if(!name) return ''; var n = name.toUpperCase(); for(var i=0; i<ABBR.length; i++) { if(n === ABBR[i].original) return ABBR[i].short; } return n; }",
 "        async function initApp() { var res = await fetch('/api/leagues'); LEAGUES = await res.json(); var sel = document.getElementById('fLega'); sel.innerHTML = \"<option value=''>TUTTE LE LEGHE</option>\"; for(var i=0; i<LEAGUES.length; i++) if(LEAGUES[i].is_active) sel.innerHTML += \"<option value='\" + LEAGUES[i].id + \"'>\" + LEAGUES[i].name + \"</option>\"; loadMatches(); }",
@@ -445,8 +467,9 @@ function generateHTML() {
 "            if(type==='full') toggleModal('adminModal'); else toggleModal('leaguesModal');",
 "            toggleModal('consoleModal'); document.getElementById('consoleLog').innerHTML = \"\";",
 "            logConsole(\"AVVIO SINCRONIZZAZIONE...\", \"success\");",
-"            var seasons = []; var now = new Date(); var currentYear = now.getFullYear(); var endYear = now.getMonth() >= 6 ? currentYear : currentYear - 1; for (var y = 2000; y <= endYear; y++) { seasons.push(String(y).slice(-2) + String(y + 1).slice(-2)); } seasons.reverse();",
-"            var list = []; if(singleId) { list.push(getLega(singleId)); } else { for(var i=0; i<LEAGUES.length; i++) if(LEAGUES[i].is_active) list.push(LEAGUES[i]); }",
+"            var seasons = getSeasonsSince2000(); var list = [];",
+"            if(singleId) { list.push(getLega(singleId)); }",
+"            else { for(var i=0; i<LEAGUES.length; i++) if(LEAGUES[i].is_active) list.push(LEAGUES[i]); }",
 "            for(var i=0; i<list.length; i++) {",
 "                var l = list[i]; logConsole(\"--- ELABORAZIONE \" + l.name + \" ---\", \"\");",
 "                if(l.type==='extra') {",
@@ -508,25 +531,14 @@ function generateHTML() {
 "            var activeHtml = \"<table width='100%'><thead><tr><th>TAG</th><th>ID</th><th>NOME</th><th>AZIONI</th></tr></thead><tbody>\";",
 "            var archHtml = \"<table width='100%'><thead><tr><th>ID</th><th>NOME</th><th>AZIONI</th></tr></thead><tbody>\";",
 "            for(var i=0; i<data.length; i++) {",
-"                var l = data[i];",
-"                if(l.is_active) {",
-"                    activeHtml += \"<tr class='border-b border-zinc-800'><td><span class='div-tag' style='background:\"+l.color+\"; color:\"+l.text_color+\"'>\"+l.id+\"</span></td><td>\"+l.id+\"</td><td>\"+l.name+\"</td><td><button class='btn btn-primary' onclick=\\\"editLeague('\"+l.id+\"','\"+l.name.replace(/'/g,\"\\\\'\")+\"','\"+l.country.replace(/'/g,\"\\\\'\")+\"','\"+l.engine_country+\"','\"+l.color+\"','\"+l.text_color+\"','\"+l.type+\"')\\\">✏️</button> <button class='btn btn-warning ml-1' onclick=\\\"startSync('single','\"+l.id+\"')\\\">♻️</button> <button class='btn btn-danger ml-1' onclick=\\\"deleteLeague('\"+l.id+\"')\\\">🗑️</button></td></tr>\";",
-"                } else {",
-"                    archHtml += \"<tr class='border-b border-zinc-800'><td>\"+l.id+\"</td><td>\"+l.name+\"</td><td><button class='btn btn-success' onclick=\\\"restoreLeague('\"+l.id+\"')\\\">RIPRISTINA</button></td></tr>\";",
-"                }",
+"                var l = data[i]; if(l.is_active) { activeHtml += \"<tr class='border-b border-zinc-800'><td><span class='div-tag' style='background:\"+l.color+\"; color:\"+l.text_color+\"'>\"+l.id+\"</span></td><td>\"+l.id+\"</td><td>\"+l.name+\"</td><td><button class='btn btn-primary' onclick=\\\"editLeague('\"+l.id+\"','\"+l.name.replace(/'/g,\"\\\\'\")+\"','\"+l.country.replace(/'/g,\"\\\\'\")+\"','\"+l.engine_country+\"','\"+l.color+\"','\"+l.text_color+\"','\"+l.type+\"')\\\">✏️</button> <button class='btn btn-warning ml-1' onclick=\\\"startSync('single','\"+l.id+\"')\\\">♻️</button> <button class='btn btn-danger ml-1' onclick=\\\"deleteLeague('\"+l.id+\"')\\\">🗑️</button></td></tr>\"; } else { archHtml += \"<tr class='border-b border-zinc-800'><td>\"+l.id+\"</td><td>\"+l.name+\"</td><td><button class='btn btn-success' onclick=\\\"restoreLeague('\"+l.id+\"')\\\">RIPRISTINA</button></td></tr>\"; }",
 "            }",
 "            document.getElementById('leaguesList').innerHTML = activeHtml + \"</tbody></table>\";",
 "            document.getElementById('archivedList').innerHTML = archHtml + \"</tbody></table>\";",
 "            if(document.getElementById('leaguesModal').style.display !== 'block') toggleModal('leaguesModal');",
 "        }",
 "        function editLeague(id, name, country, engine, color, textColor, type) { document.getElementById('lId').value = id; document.getElementById('lName').value = name; document.getElementById('lCountry').value = country; document.getElementById('lEngine').value = engine; document.getElementById('lColor').value = color; document.getElementById('lHex').value = color; document.getElementById('lTextColor').value = textColor; document.getElementById('lType').value = type; }",
-"        async function addLeague() {",
-"            var l = { id: document.getElementById('lId').value, name: document.getElementById('lName').value, country: document.getElementById('lCountry').value, engine_country: document.getElementById('lEngine').value, color: document.getElementById('lColor').value, text_color: document.getElementById('lTextColor').value, type: document.getElementById('lType').value };",
-"            if(!l.id || !l.name) return alert('Compila i campi!');",
-"            await fetch('/api/admin/add-league', { method:'POST', body: JSON.stringify(l) });",
-"            document.getElementById('lId').value=''; document.getElementById('lName').value=''; document.getElementById('lCountry').value=''; document.getElementById('lEngine').value='';",
-"            openLeagues(); initApp();",
-"        }",
+"        async function addLeague() { var l = { id: document.getElementById('lId').value, name: document.getElementById('lName').value, country: document.getElementById('lCountry').value, engine_country: document.getElementById('lEngine').value, color: document.getElementById('lColor').value, text_color: document.getElementById('lTextColor').value, type: document.getElementById('lType').value }; if(!l.id || !l.name) return alert('Compila i campi!'); await fetch('/api/admin/add-league', { method:'POST', body: JSON.stringify(l) }); document.getElementById('lId').value=''; document.getElementById('lName').value=''; document.getElementById('lCountry').value=''; document.getElementById('lEngine').value=''; openLeagues(); initApp(); }",
 "        async function deleteLeague(id) { if(!confirm('Eliminare partite e archiviare lega?')) return; await fetch('/api/admin/delete-league', { method:'POST', body: JSON.stringify({id:id}) }); openLeagues(); initApp(); }",
 "        async function restoreLeague(id) { await fetch('/api/admin/restore-league', { method:'POST', body: JSON.stringify({id:id}) }); openLeagues(); initApp(); }",
 "        function resetPage() { currentPage = 1; loadMatches(); }",
