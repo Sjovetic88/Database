@@ -16,7 +16,7 @@ crons = ["* * * * *"]
 # Variabili d'ambiente
 [vars]
 ADMIN_PASSWORD = "RESET"
-
+ENGINE_URL = "https://engine.sjovetic88.workers.dev"
 # Limiti di utilizzo (Ottimizzazione per piano Free)
 [observability]
 enabled = true
