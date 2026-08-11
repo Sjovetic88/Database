@@ -79,7 +79,7 @@ function getCurrentSeason() {
 
 async function updateSignal(env, force = false) {
   if (force) {
-    const ts = new Date().toLocaleString("it-IT", { timeZone: "Europe/Rome" });
+    const ts = new Date().toISOString();
     await env.DB.prepare("INSERT OR REPLACE INTO system_status (key, value) VALUES ('LAST_UPDATE', ?)").bind(ts).run();
     if (env.ENGINE_URL) {
       try { await fetch(env.ENGINE_URL + "/api/trigger-update", { method: "POST" }); } catch(e) {}
